@@ -358,6 +358,7 @@ static int server_message_proc(void)
 			((HANDLER)msg.arg_in.handler)();
 			break;
 		case MSG_SCANNER_QR_CODE_BEGIN:
+		{
 			char *data = NULL;
 			ret = iot_scan_code(&data);
 			send_iot_ack(&msg, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg.receiver, ret,
@@ -365,6 +366,7 @@ static int server_message_proc(void)
 			if(data != NULL)
 				free(data);
 			break;
+		}
 		default:
 			log_err("not processed message = %d", msg.message);
 			break;
