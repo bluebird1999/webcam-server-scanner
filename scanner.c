@@ -22,6 +22,7 @@
 //program header
 #include "../../tools/tools_interface.h"
 #include "../../manager/manager_interface.h"
+#include "../../server/speaker/speaker_interface.h"
 //server header
 #include "scanner.h"
 #include "scanner_interface.h"
@@ -61,6 +62,7 @@ static int deinit_qrcode_isp(void);
 static int zbar_run(char **data);
 static char *zbar_process(struct rts_av_buffer *buffer, char **result);
 static int iot_scan_code(char **data);
+static void play_voice(int server_type, int type);
 //specific
 
 /*
@@ -72,9 +74,43 @@ static int iot_scan_code(char **data);
 /*
  * helper
  */
+static void play_voice(int server_type, int type)
+{
+	message_t message;
+	msg_init(&message);
+
+	message.sender = message.receiver = server_type;
+	message.message = MSG_SPEAKER_CTL_PLAY;
+
+	switch(type){
+		case SPEAKER_CTL_ZBAR_SCAN:
+			message.arg_in.cat = SPEAKER_CTL_ZBAR_SCAN;
+			break;
+		case SPEAKER_CTL_ZBAR_SCAN_SUCCEED:
+			message.arg_in.cat = SPEAKER_CTL_ZBAR_SCAN_SUCCEED;
+			break;
+		case SPEAKER_CTL_DEV_START_FINISH:
+			message.arg_in.cat = SPEAKER_CTL_DEV_START_FINISH;
+			break;
+		case SPEAKER_CTL_WIFI_CONNECT:
+			message.arg_in.cat = SPEAKER_CTL_WIFI_CONNECT;
+			break;
+		default:
+			log_err("not support voice type");
+			return;
+	}
+
+	server_speaker_message(&message);
+}
+
 static int iot_scan_code(char **data)
 {
 	int ret = 0;
+	server_status_t st;
+
+	//message body
+	play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
+
 	ret = init_qrcode_isp();
 	if(ret)
 	{
@@ -82,12 +118,30 @@ static int iot_scan_code(char **data)
 		return -1;
 	}
 
-	while(!zbar_run(data));
-	ret != deinit_qrcode_isp();
+	while(!server_get_status(STATUS_TYPE_EXIT))
+	{
+		//exit logic
+		st = server_get_status(STATUS_TYPE_STATUS);
+		if( st != STATUS_RUN ) {
+			if ( st == STATUS_IDLE || st == STATUS_SETUP || st == STATUS_START)
+				continue;
+			else
+				break;
+		}
+
+		if(zbar_run(data))
+			break;
+	}
+
+	ret = deinit_qrcode_isp();
+	if(ret)
 	{
 		log_err("deinit_qrcode_isp failed");
 		return -1;
 	}
+
+	//message body
+	play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN_SUCCEED);
 
 	return ret;
 }
@@ -227,6 +281,7 @@ static void server_thread_termination(void)
 {
 	message_t msg;
 	memset(&msg, 0, sizeof(message_t));
+	msg.sender = msg.receiver = SERVER_SCANNER;
 	msg.message = MSG_SCANNER_SIGINT;
 	manager_message(&msg);
 }
@@ -234,6 +289,9 @@ static void server_thread_termination(void)
 static int server_release(void)
 {
 	msg_buffer_release(&message);
+
+
+
 	return 0;
 }
 
@@ -362,7 +420,7 @@ static int server_message_proc(void)
 			char *data = NULL;
 			ret = iot_scan_code(&data);
 			send_iot_ack(&msg, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg.receiver, ret,
-					data, strlen(data));
+					data, strlen(data) + 1);
 			if(data != NULL)
 				free(data);
 			break;
