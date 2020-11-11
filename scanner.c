@@ -23,6 +23,11 @@
 #include "../../tools/tools_interface.h"
 #include "../../manager/manager_interface.h"
 #include "../../server/speaker/speaker_interface.h"
+#include "../../server/miio/miio_interface.h"
+#include "../../server/miss/miss_interface.h"
+#include "../../server/realtek/realtek_interface.h"
+#include "../../server/audio/audio_interface.h"
+#include "../../server/recorder/recorder_interface.h"
 //server header
 #include "scanner.h"
 #include "scanner_interface.h"
@@ -36,6 +41,8 @@ static int isp = -1;
 static server_info_t 		info;
 static message_buffer_t		message;
 static char zbar_buf[ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH] = {0};
+static int scanner_status = 0;
+static message_t msg_scan_t;
 
 //function
 //common
@@ -56,12 +63,12 @@ static int server_set_status(int type, int st);
 static void server_thread_termination(void);
 static int send_message(int receiver, message_t *msg);
 static int send_iot_ack(message_t *org_msg, message_t *msg, int id, int receiver, int result, void *arg, int size);
-
+static void *scanner_func(void *arg);
 static int init_qrcode_isp(void);
 static int deinit_qrcode_isp(void);
 static int zbar_run(char **data);
 static char *zbar_process(struct rts_av_buffer *buffer, char **result);
-static int iot_scan_code(char **data);
+static int iot_scan_code(message_t *data);
 static void play_voice(int server_type, int type);
 //specific
 
@@ -81,32 +88,25 @@ static void play_voice(int server_type, int type)
 
 	message.sender = message.receiver = server_type;
 	message.message = MSG_SPEAKER_CTL_PLAY;
-
-	switch(type){
-		case SPEAKER_CTL_ZBAR_SCAN:
-			message.arg_in.cat = SPEAKER_CTL_ZBAR_SCAN;
-			break;
-		case SPEAKER_CTL_ZBAR_SCAN_SUCCEED:
-			message.arg_in.cat = SPEAKER_CTL_ZBAR_SCAN_SUCCEED;
-			break;
-		case SPEAKER_CTL_DEV_START_FINISH:
-			message.arg_in.cat = SPEAKER_CTL_DEV_START_FINISH;
-			break;
-		case SPEAKER_CTL_WIFI_CONNECT:
-			message.arg_in.cat = SPEAKER_CTL_WIFI_CONNECT;
-			break;
-		default:
-			log_err("not support voice type");
-			return;
-	}
+	message.arg_in.cat = type;
 
 	server_speaker_message(&message);
 }
 
-static int iot_scan_code(char **data)
+static void *scanner_func(void *arg)
 {
 	int ret = 0;
+	char *data = NULL;
 	server_status_t st;
+	message_t send_msg;
+
+    signal(SIGINT, (__sighandler_t)server_thread_termination);
+    signal(SIGTERM, (__sighandler_t)server_thread_termination);
+	misc_set_thread_name("scanner_qr_thread");
+    pthread_detach(pthread_self());
+    msg_init(&send_msg);
+
+    log_err("msg->receiver = %d", msg_scan_t.receiver);
 
 	//message body
 	play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
@@ -115,33 +115,64 @@ static int iot_scan_code(char **data)
 	if(ret)
 	{
 		log_err("init_qrcode_isp failed");
-		return -1;
+		goto exit;
 	}
 
-	while(!server_get_status(STATUS_TYPE_EXIT))
-	{
+    while(!server_get_status(STATUS_TYPE_EXIT))
+    {
 		//exit logic
 		st = server_get_status(STATUS_TYPE_STATUS);
-		if( st != STATUS_RUN ) {
+    	if( st != STATUS_RUN ) {
 			if ( st == STATUS_IDLE || st == STATUS_SETUP || st == STATUS_START)
 				continue;
 			else
 				break;
 		}
 
-		if(zbar_run(data))
+		if(zbar_run(&data))
 			break;
+    }
+
+	if(data != NULL)
+	{
+		//message body
+		//play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN_SUCCEED);
+
+		send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
+							data, strlen(data) + 1);
+
+		free(data);
+
 	}
 
-	ret = deinit_qrcode_isp();
-	if(ret)
-	{
+exit:
+	scanner_status = 0;
+	if(deinit_qrcode_isp())
 		log_err("deinit_qrcode_isp failed");
+
+	msg_free(&msg_scan_t);
+	pthread_exit(0);
+}
+
+static int iot_scan_code(message_t *data)
+{
+	int ret = 0;
+	static pthread_t scanner_mode_tid = 0;
+
+	if(scanner_status != 0)
+	{
+		log_err("scanner qr thread is busy");
 		return -1;
 	}
 
-	//message body
-	play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN_SUCCEED);
+	msg_deep_copy(&msg_scan_t, data);
+
+	if (ret |= pthread_create(&scanner_mode_tid, NULL, scanner_func, NULL)) {
+		log_err("create daynight_mode_func thread failed, ret = %d\n", ret);
+		ret = -1;
+	} else {
+		scanner_status = 1;
+	}
 
 	return ret;
 }
@@ -226,13 +257,16 @@ static int deinit_qrcode_isp(void)
     int ret;
 
     ret = rts_av_stop_recv(isp);
-    log_info("rts_av_stop_recv isp ret = %d\r\n", ret);
+    if(ret)
+    	log_info("rts_av_stop_recv isp ret = %d\r\n", ret);
 
     ret = rts_av_disable_chn(isp);
-    log_info("rts_av_disable_chn isp ret = %d\r\n", ret);
+    if(ret)
+    	log_info("rts_av_disable_chn isp ret = %d\r\n", ret);
 
     ret = rts_av_destroy_chn(isp);
-    log_info("rts_av_destroy_chn isp ret = %d\r\n", ret);
+    if(ret)
+    	log_info("rts_av_destroy_chn isp ret = %d\r\n", ret);
 
     isp = -1;
 
@@ -289,9 +323,6 @@ static void server_thread_termination(void)
 static int server_release(void)
 {
 	msg_buffer_release(&message);
-
-
-
 	return 0;
 }
 
@@ -307,6 +338,7 @@ static int send_message(int receiver, message_t *msg)
 	case SERVER_KERNEL:
 		break;
 	case SERVER_REALTEK:
+		st = server_realtek_message(msg);
 		break;
 	case SERVER_MIIO:
 		st = server_miio_message(msg);
@@ -338,7 +370,7 @@ static int send_iot_ack(message_t *org_msg, message_t *msg, int id, int receiver
 	msg_init(msg);
 	memcpy(&(msg->arg_pass), &(org_msg->arg_pass),sizeof(message_arg_t));
 	msg->message = id | 0x1000;
-	msg->sender = msg->receiver = SERVER_DEVICE;
+	msg->sender = msg->receiver = SERVER_SCANNER;
 	msg->result = result;
 	msg->arg = arg;
 	msg->arg_size = size;
@@ -416,15 +448,8 @@ static int server_message_proc(void)
 			((HANDLER)msg.arg_in.handler)();
 			break;
 		case MSG_SCANNER_QR_CODE_BEGIN:
-		{
-			char *data = NULL;
-			ret = iot_scan_code(&data);
-			send_iot_ack(&msg, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg.receiver, ret,
-					data, strlen(data) + 1);
-			if(data != NULL)
-				free(data);
+			ret = iot_scan_code(&msg);
 			break;
-		}
 		default:
 			log_err("not processed message = %d", msg.message);
 			break;

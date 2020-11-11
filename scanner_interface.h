@@ -16,7 +16,7 @@
 /*
  * define
  */
-#define		SERVER_SCANNER_VERSION_STRING			"alpha-1.1"
+#define		SERVER_SCANNER_VERSION_STRING			"alpha-1.5"
 
 #define		MSG_SCANNER_BASE						(SERVER_SCANNER<<16)
 #define		MSG_SCANNER_SIGINT						MSG_SCANNER_BASE | 0x0000
