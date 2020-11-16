@@ -43,7 +43,7 @@ static message_buffer_t		message;
 static char zbar_buf[ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH] = {0};
 static int scanner_status = 0;
 static message_t msg_scan_t;
-
+static const char *key = "89JFSjo8HUbhou5776NJOMp9i90ghg7Y78G78t68899y79HY7g7y87y9ED45Ew30O0jkkl";
 //function
 //common
 static void *server_func(void);
@@ -70,6 +70,9 @@ static int zbar_run(char **data);
 static char *zbar_process(struct rts_av_buffer *buffer, char **result);
 static int iot_scan_code(message_t *data);
 static void play_voice(int server_type, int type);
+static void xor_crypt(const char *key, char *string, int n);
+static unsigned char *base64_decode(unsigned char *code);
+static int prase_data(char *src, char **dest);
 //specific
 
 /*
@@ -81,6 +84,143 @@ static void play_voice(int server_type, int type);
 /*
  * helper
  */
+static int prase_data(char *src, char **dest)
+{
+	int ret = 0;
+	char *p = NULL;
+	char *bind_key = NULL;
+	char *ssid = NULL;
+	char *pssd = NULL;
+	char *timezone = NULL;
+	char *region = NULL;
+	char *tmp = NULL;
+	cJSON *pJsonRoot  = NULL;
+	cJSON *pSubJson   = NULL;
+
+	p = strsep(&src, "&");
+	while(p != NULL)
+	{
+		if(strstr(p, "b="))
+			bind_key = p+2;
+		else if (strstr(p, "s="))
+			ssid = p+2;
+		else if (strstr(p, "p="))
+			pssd = p+2;
+		else if (strstr(p, "t="))
+			timezone = p+2;
+		else if (strstr(p, "r="))
+			region = p+2;
+		p = strsep(&src, "&");
+	}
+
+	pJsonRoot = cJSON_CreateObject();
+	if(NULL == pJsonRoot)
+	{
+		log_qcy(DEBUG_SERIOUS, "cJSON_CreateObject failed");
+		return -1;
+	}
+
+	cJSON_AddNumberToObject(pJsonRoot, "id", 12345);
+	cJSON_AddStringToObject(pJsonRoot, "method", "local.ble.config_router");
+	pSubJson = cJSON_CreateObject();
+	if(NULL == pSubJson)
+	{
+		log_qcy(DEBUG_SERIOUS, "cJSON_CreateObject failed");
+		ret = -1;
+		goto err;
+	}
+
+	ssid = base64_decode(ssid);
+	pssd = base64_decode(pssd);
+	xor_crypt(key, pssd, strlen(pssd));
+
+	if(bind_key)
+		cJSON_AddStringToObject(pSubJson, "bind_key", bind_key);
+	if(ssid)
+		cJSON_AddStringToObject(pSubJson, "ssid", ssid);
+	if(pssd)
+		cJSON_AddStringToObject(pSubJson, "passwd", pssd);
+	if(timezone)
+		cJSON_AddStringToObject(pSubJson, "tz", timezone);
+	if(region)
+		cJSON_AddStringToObject(pSubJson, "country_domain", region);
+
+	cJSON_AddItemToObject(pJsonRoot, "params", pSubJson);
+
+	tmp = cJSON_Print(pJsonRoot);
+	*dest = calloc(strlen(tmp) + 1, 1);
+	if(*dest == NULL)
+	{
+		log_qcy(DEBUG_SERIOUS, "malloc failed");
+		ret = -1;
+		goto err;
+	}
+
+	memcpy(*dest, tmp, strlen(tmp));
+
+err:
+	if(ssid != NULL)
+		free(ssid);
+	if(pssd != NULL)
+		free(pssd);
+
+	cJSON_Delete(pJsonRoot);
+	return ret;
+}
+
+static unsigned char *base64_decode(unsigned char *code)
+{
+    int table[]={0,0,0,0,0,0,0,0,0,0,0,0,
+    		 0,0,0,0,0,0,0,0,0,0,0,0,
+    		 0,0,0,0,0,0,0,0,0,0,0,0,
+    		 0,0,0,0,0,0,0,62,0,0,0,
+    		 63,52,53,54,55,56,57,58,
+    		 59,60,61,0,0,0,0,0,0,0,0,
+    		 1,2,3,4,5,6,7,8,9,10,11,12,
+    		 13,14,15,16,17,18,19,20,21,
+    		 22,23,24,25,0,0,0,0,0,0,26,
+    		 27,28,29,30,31,32,33,34,35,
+    		 36,37,38,39,40,41,42,43,44,
+    		 45,46,47,48,49,50,51
+    	       };
+    long len;
+    long str_len;
+    unsigned char *res;
+    int i,j;
+
+    len=strlen(code);
+    if(strstr(code,"=="))
+        str_len=len/4*3-2;
+    else if(strstr(code,"="))
+        str_len=len/4*3-1;
+    else
+        str_len=len/4*3;
+
+    res=malloc(sizeof(unsigned char)*str_len+1);
+    res[str_len]='\0';
+
+    for(i=0,j=0;i < len-2;j+=3,i+=4)
+    {
+        res[j]=((unsigned char)table[code[i]])<<2 | (((unsigned char)table[code[i+1]])>>4);
+        res[j+1]=(((unsigned char)table[code[i+1]])<<4) | (((unsigned char)table[code[i+2]])>>2);
+        res[j+2]=(((unsigned char)table[code[i+2]])<<6) | ((unsigned char)table[code[i+3]]);
+    }
+
+    return res;
+}
+
+static void xor_crypt(const char *key, char *string, int n)
+{
+    int i;
+    int len = strlen(key);
+    for (i = 0; i < n; i++)
+    {
+        string[i] = string[i] ^ key[i % len];
+        if (string[i] == 0)
+            string[i] = key[i % len];
+    }
+}
+
 static void play_voice(int server_type, int type)
 {
 	message_t message;
@@ -97,6 +237,7 @@ static void *scanner_func(void *arg)
 {
 	int ret = 0;
 	char *data = NULL;
+	char *result = NULL;
 	server_status_t st;
 	message_t send_msg;
 
@@ -106,15 +247,13 @@ static void *scanner_func(void *arg)
     pthread_detach(pthread_self());
     msg_init(&send_msg);
 
-    log_err("msg->receiver = %d", msg_scan_t.receiver);
-
 	//message body
 	play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
 
 	ret = init_qrcode_isp();
 	if(ret)
 	{
-		log_err("init_qrcode_isp failed");
+		log_qcy(DEBUG_SERIOUS, "init_qrcode_isp failed");
 		goto exit;
 	}
 
@@ -138,17 +277,24 @@ static void *scanner_func(void *arg)
 		//message body
 		//play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN_SUCCEED);
 
-		send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
-							data, strlen(data) + 1);
+		ret = prase_data(data, &result);
+		log_qcy(DEBUG_SERIOUS, "prase_data ------- result = %s", result);
+		if(!ret)
+			send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
+					result, strlen(result) + 1);
+		else
+			send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
+								NULL, 0);
 
 		free(data);
-
+		if(result)
+			free(result);
 	}
 
 exit:
 	scanner_status = 0;
 	if(deinit_qrcode_isp())
-		log_err("deinit_qrcode_isp failed");
+		log_qcy(DEBUG_SERIOUS, "deinit_qrcode_isp failed");
 
 	msg_free(&msg_scan_t);
 	pthread_exit(0);
@@ -161,14 +307,14 @@ static int iot_scan_code(message_t *data)
 
 	if(scanner_status != 0)
 	{
-		log_err("scanner qr thread is busy");
+		log_qcy(DEBUG_SERIOUS, "scanner qr thread is busy");
 		return -1;
 	}
 
 	msg_deep_copy(&msg_scan_t, data);
 
 	if (ret |= pthread_create(&scanner_mode_tid, NULL, scanner_func, NULL)) {
-		log_err("create daynight_mode_func thread failed, ret = %d\n", ret);
+		log_qcy(DEBUG_SERIOUS, "create daynight_mode_func thread failed, ret = %d\n", ret);
 		ret = -1;
 	} else {
 		scanner_status = 1;
@@ -197,14 +343,14 @@ static char *zbar_process(struct rts_av_buffer *buffer, char **result)
     /* scan the image for barcodes */
     int n = zbar_scan_image(scanner, image);
     if(n != 0)
-    	log_err("result1 n = %d\r\n", n);
+    	log_qcy(DEBUG_VERBOSE, "result1 n = %d\r\n", n);
     /* extract results */
     const zbar_symbol_t *symbol = zbar_image_first_symbol(image);
     for(; symbol; symbol = zbar_symbol_next(symbol)) {
         /* do something useful with results */
 //      zbar_symbol_type_t typ = zbar_symbol_get_type(symbol);
         const char *data = zbar_symbol_get_data(symbol);
-        log_err("=========================================decoded QR CODE symbol \"%s\"\r\n",data);
+        log_qcy(DEBUG_VERBOSE, "=========================================decoded QR CODE symbol \"%s\"\r\n",data);
 
         *result = calloc(strlen(data), 1);
         if(*result) {
@@ -225,11 +371,11 @@ static int zbar_run(char **data)
     struct rts_av_buffer *buffer = NULL;
 
     if (rts_av_poll(isp)) {
-        //log_err("rts_av_poll isp failed");
+        //log_qcy(DEBUG_SERIOUS, "rts_av_poll isp failed");
         return 0;
     }
     if (rts_av_recv(isp, &buffer)) {
-    	//log_err("rts_av_recv isp buffer failed");
+    	//log_qcy(DEBUG_SERIOUS, "rts_av_recv isp buffer failed");
     	return 0;
     }
     if(buffer) {
@@ -284,7 +430,7 @@ static int init_qrcode_isp(void)
         isp_attr.isp_buf_num = 2;
         isp = rts_av_create_isp_chn(&isp_attr);
         if (isp < 0) {
-            log_err("fail to create isp chn, ret = %d\n", isp);
+            log_qcy(DEBUG_SERIOUS, "fail to create isp chn, ret = %d\n", isp);
             ret = -1;
         }
         log_info("isp chn : %d\n", isp);
@@ -296,7 +442,7 @@ static int init_qrcode_isp(void)
             profile.video.height = ZBAR_QRCODE_HIGH;
             ret = rts_av_set_profile(isp, &profile);
             if (ret)
-                log_err("set isp profile fail, ret = %d\n", ret);
+                log_qcy(DEBUG_SERIOUS, "set isp profile fail, ret = %d\n", ret);
 
             sleep(1);
         } while(ret);
@@ -384,7 +530,7 @@ static int server_set_status(int type, int st)
 	int ret=-1;
 	ret = pthread_rwlock_wrlock(&info.lock);
 	if(ret)	{
-		log_err("add lock fail, ret = %d", ret);
+		log_qcy(DEBUG_SERIOUS, "add lock fail, ret = %d", ret);
 		return ret;
 	}
 	if(type == STATUS_TYPE_STATUS)
@@ -393,7 +539,7 @@ static int server_set_status(int type, int st)
 		info.exit = st;
 	ret = pthread_rwlock_unlock(&info.lock);
 	if (ret)
-		log_err("add unlock fail, ret = %d", ret);
+		log_qcy(DEBUG_SERIOUS, "add unlock fail, ret = %d", ret);
 	return ret;
 }
 
@@ -403,7 +549,7 @@ static int server_get_status(int type)
 	int ret;
 	ret = pthread_rwlock_wrlock(&info.lock);
 	if(ret)	{
-		log_err("add lock fail, ret = %d", ret);
+		log_qcy(DEBUG_SERIOUS, "add lock fail, ret = %d", ret);
 		return ret;
 	}
 	if(type == STATUS_TYPE_STATUS)
@@ -412,7 +558,7 @@ static int server_get_status(int type)
 		st = info.exit;
 	ret = pthread_rwlock_unlock(&info.lock);
 	if (ret)
-		log_err("add unlock fail, ret = %d", ret);
+		log_qcy(DEBUG_SERIOUS, "add unlock fail, ret = %d", ret);
 	return st;
 }
 
@@ -425,13 +571,13 @@ static int server_message_proc(void)
 	msg_init(&send_msg);
 	ret = pthread_rwlock_wrlock(&message.lock);
 	if(ret)	{
-		log_err("add message lock fail, ret = %d\n", ret);
+		log_qcy(DEBUG_SERIOUS, "add message lock fail, ret = %d\n", ret);
 		return ret;
 	}
 	ret = msg_buffer_pop(&message, &msg);
 	ret1 = pthread_rwlock_unlock(&message.lock);
 	if (ret1) {
-		log_err("add message unlock fail, ret = %d\n", ret1);
+		log_qcy(DEBUG_SERIOUS, "add message unlock fail, ret = %d\n", ret1);
 	}
 	if( ret == -1) {
 		msg_free(&msg);
@@ -451,7 +597,7 @@ static int server_message_proc(void)
 			ret = iot_scan_code(&msg);
 			break;
 		default:
-			log_err("not processed message = %d", msg.message);
+			log_qcy(DEBUG_SERIOUS, "not processed message = %d", msg.message);
 			break;
 	}
 	msg_free(&msg);
@@ -520,7 +666,7 @@ static int server_run(void)
 {
 	int ret = 0;
 	if( server_message_proc()!= 0)
-		log_err("error in message proc");
+		log_qcy(DEBUG_SERIOUS, "error in message proc");
 
 	return ret;
 }
@@ -605,11 +751,11 @@ int server_scanner_start(void)
 	pthread_rwlock_init(&info.lock, NULL);
 	ret = pthread_create(&info.id, NULL, (void *)server_func, NULL);
 	if(ret != 0) {
-		log_err("scanner server create error! ret = %d",ret);
+		log_qcy(DEBUG_SERIOUS, "scanner server create error! ret = %d",ret);
 		 return ret;
 	 }
 	else {
-		log_err("scanner server create successful!");
+		log_qcy(DEBUG_INFO, "scanner server create successful!");
 		return 0;
 	}
 }
@@ -618,19 +764,19 @@ int server_scanner_message(message_t *msg)
 {
 	int ret=0,ret1;
 	if( server_get_status(STATUS_TYPE_STATUS)!= STATUS_RUN ) {
-		log_err("scanner server is not ready!");
+		log_qcy(DEBUG_SERIOUS, "scanner server is not ready!");
 		return -1;
 	}
 	ret = pthread_rwlock_wrlock(&message.lock);
 	if(ret)	{
-		log_err("add message lock fail, ret = %d\n", ret);
+		log_qcy(DEBUG_SERIOUS, "add message lock fail, ret = %d\n", ret);
 		return ret;
 	}
 	ret = msg_buffer_push(&message, msg);
 	if( ret!=0 )
-		log_err("message push in scanner error =%d", ret);
+		log_qcy(DEBUG_SERIOUS, "message push in scanner error =%d", ret);
 	ret1 = pthread_rwlock_unlock(&message.lock);
 	if (ret1)
-		log_err("add message unlock fail, ret = %d\n", ret1);
+		log_qcy(DEBUG_SERIOUS, "add message unlock fail, ret = %d\n", ret1);
 	return ret;
 }
