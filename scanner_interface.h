@@ -16,7 +16,7 @@
 /*
  * define
  */
-#define		SERVER_SCANNER_VERSION_STRING			"alpha-2.0"
+#define		SERVER_SCANNER_VERSION_STRING			"alpha-2.1"
 
 #define		MSG_SCANNER_BASE						(SERVER_SCANNER<<16)
 #define		MSG_SCANNER_SIGINT						MSG_SCANNER_BASE | 0x0000
@@ -25,6 +25,9 @@
 
 #define		MSG_SCANNER_QR_CODE_BEGIN				MSG_SCANNER_BASE | 0x0001
 #define		MSG_SCANNER_QR_CODE_BEGIN_ACK			MSG_SCANNER_BASE | 0x1001
+
+
+
 
 /*
  * structure

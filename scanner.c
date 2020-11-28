@@ -274,14 +274,14 @@ static void *scanner_func(void *arg)
 
 	if(data != NULL)
 	{
-		//message body
-		//play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN_SUCCEED);
-
 		ret = prase_data(data, &result);
 		log_qcy(DEBUG_SERIOUS, "prase_data ------- result = %s", result);
 		if(!ret)
+		{
+			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN_SUCCEED);
 			send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
-					result, strlen(result) + 1);
+								result, strlen(result) + 1);
+		}
 		else
 			send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
 								NULL, 0);
@@ -469,6 +469,7 @@ static void server_thread_termination(void)
 static int server_release(void)
 {
 	msg_buffer_release(&message);
+	memset(&info,0,sizeof(server_info_t));
 	return 0;
 }
 
