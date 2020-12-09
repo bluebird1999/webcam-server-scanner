@@ -67,7 +67,7 @@ static void *scanner_func(void *arg);
 static int init_qrcode_isp(void);
 static int deinit_qrcode_isp(void);
 static int zbar_run(char **data);
-static char *zbar_process(struct rts_av_buffer *buffer, char **result);
+static int zbar_process(struct rts_av_buffer *buffer, char **result);
 static int iot_scan_code(message_t *data);
 static void play_voice(int server_type, int type);
 static void xor_crypt(const char *key, char *string, int n);
@@ -113,6 +113,12 @@ static int prase_data(char *src, char **dest)
 		p = strsep(&src, "&");
 	}
 
+	if(ssid == NULL || pssd == NULL || bind_key == NULL || timezone == NULL)
+	{
+		log_qcy(DEBUG_SERIOUS, "scan error, please check qr code");
+		return -1;
+	}
+
 	pJsonRoot = cJSON_CreateObject();
 	if(NULL == pJsonRoot)
 	{
@@ -130,9 +136,13 @@ static int prase_data(char *src, char **dest)
 		goto err;
 	}
 
-	ssid = base64_decode(ssid);
-	pssd = base64_decode(pssd);
-	xor_crypt(key, pssd, strlen(pssd));
+	if(ssid)
+		ssid = base64_decode(ssid);
+	if(pssd)
+	{
+		pssd = base64_decode(pssd);
+		xor_crypt(key, pssd, strlen(pssd));
+	}
 
 	if(bind_key)
 		cJSON_AddStringToObject(pSubJson, "bind_key", bind_key);
@@ -270,14 +280,16 @@ static void *scanner_func(void *arg)
 
 		if(zbar_run(&data))
 			break;
+
+		//free(data);
     }
 
 	if(data != NULL)
 	{
 		ret = prase_data(data, &result);
-		log_qcy(DEBUG_SERIOUS, "prase_data ------- result = %s", result);
 		if(!ret)
 		{
+			log_qcy(DEBUG_SERIOUS, "prase_data ------- result = %s", result);
 			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN_SUCCEED);
 			send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
 								result, strlen(result) + 1);
@@ -323,9 +335,9 @@ static int iot_scan_code(message_t *data)
 	return ret;
 }
 
-static char *zbar_process(struct rts_av_buffer *buffer, char **result)
+static int zbar_process(struct rts_av_buffer *buffer, char **result)
 {
-    char *ret = NULL;
+    int ret = 1;
     zbar_image_scanner_t *scanner = NULL;
 
     scanner = zbar_image_scanner_create();
@@ -354,7 +366,8 @@ static char *zbar_process(struct rts_av_buffer *buffer, char **result)
 
         *result = calloc(strlen(data), 1);
         if(*result) {
-        	ret = memcpy(*result, data, strlen(data));
+        	memcpy(*result, data, strlen(data));
+        	ret = 0;
         }
     }
 
@@ -367,7 +380,8 @@ static char *zbar_process(struct rts_av_buffer *buffer, char **result)
 static int zbar_run(char **data)
 {
     static int count = 0;
-    char *result = NULL;
+    int result = 1;
+    int ret = 0;
     struct rts_av_buffer *buffer = NULL;
 
     if (rts_av_poll(isp)) {
@@ -390,12 +404,13 @@ static int zbar_run(char **data)
         buffer = NULL;
     }
 
-    if(result != NULL) {
+    if(!result) {
         //count = 1000;
-        return 1;
+    	if(strstr(*data, "b=") && strstr(*data, "s=") && strstr(*data, "p=") && strstr(*data, "t="))
+    		ret = 1;
     }
 
-    return 0;
+    return ret;
 }
 
 static int deinit_qrcode_isp(void)
