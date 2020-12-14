@@ -250,6 +250,8 @@ static void *scanner_func(void *arg)
 	char *result = NULL;
 	server_status_t st;
 	message_t send_msg;
+	int play_voice_ctl = 0;
+	int scanner_fun_exit = 0;
 
     signal(SIGINT, (__sighandler_t)server_thread_termination);
     signal(SIGTERM, (__sighandler_t)server_thread_termination);
@@ -267,6 +269,8 @@ static void *scanner_func(void *arg)
 		goto exit;
 	}
 
+	sleep(1);
+
     while(!server_get_status(STATUS_TYPE_EXIT))
     {
 		//exit logic
@@ -278,7 +282,26 @@ static void *scanner_func(void *arg)
 				break;
 		}
 
-		if(zbar_run(&data))
+    	ret = zbar_run(&data);
+		if(ret == 2)
+		{
+			log_qcy(DEBUG_INFO, "qr code is not right");
+			free(data);
+		}
+		else if(ret == 1)
+		{
+			break;
+		}
+
+		play_voice_ctl++;
+		if(play_voice_ctl > 20)
+		{
+			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
+			play_voice_ctl = 0;
+			scanner_fun_exit++;
+		}
+
+		if(scanner_fun_exit > 5)
 			break;
 
 		//free(data);
@@ -289,7 +312,7 @@ static void *scanner_func(void *arg)
 		ret = prase_data(data, &result);
 		if(!ret)
 		{
-			log_qcy(DEBUG_SERIOUS, "prase_data ------- result = %s", result);
+			log_qcy(DEBUG_INFO, "prase_data ------- result = %s", result);
 			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN_SUCCEED);
 			send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
 								result, strlen(result) + 1);
@@ -379,7 +402,6 @@ static int zbar_process(struct rts_av_buffer *buffer, char **result)
 
 static int zbar_run(char **data)
 {
-    static int count = 0;
     int result = 1;
     int ret = 0;
     struct rts_av_buffer *buffer = NULL;
@@ -393,12 +415,8 @@ static int zbar_run(char **data)
     	return 0;
     }
     if(buffer) {
-        if(count == 0) {
-            result = zbar_process(buffer, data);
-        }
-        else {
-            count--;
-        }
+
+        result = zbar_process(buffer, data);
 
         rts_av_put_buffer(buffer);
         buffer = NULL;
@@ -408,6 +426,8 @@ static int zbar_run(char **data)
         //count = 1000;
     	if(strstr(*data, "b=") && strstr(*data, "s=") && strstr(*data, "p=") && strstr(*data, "t="))
     		ret = 1;
+    	else
+    		ret = 2;
     }
 
     return ret;
@@ -441,7 +461,7 @@ static int init_qrcode_isp(void)
     struct rts_av_profile profile;
 
     if(isp < 0) {
-        isp_attr.isp_id = 1;
+        isp_attr.isp_id = 0;
         isp_attr.isp_buf_num = 2;
         isp = rts_av_create_isp_chn(&isp_attr);
         if (isp < 0) {
@@ -483,6 +503,9 @@ static void server_thread_termination(void)
 
 static int server_release(void)
 {
+	while(scanner_status)
+		usleep(100 * 1000);
+
 	msg_buffer_release(&message);
 	memset(&info,0,sizeof(server_info_t));
 	return 0;
