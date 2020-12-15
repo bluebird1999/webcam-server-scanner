@@ -40,10 +40,12 @@
 static int isp = -1;
 static server_info_t 		info;
 static message_buffer_t		message;
-static char zbar_buf[ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH] = {0};
+static char zbar_buf[ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH + 1] = {0};
 static int scanner_status = 0;
 static message_t msg_scan_t;
 static const char *key = "89JFSjo8HUbhou5776NJOMp9i90ghg7Y78G78t68899y79HY7g7y87y9ED45Ew30O0jkkl";
+static zbar_image_scanner_t *scanner = NULL;
+static zbar_image_t *image = NULL;
 //function
 //common
 static void *server_func(void);
@@ -65,7 +67,9 @@ static int send_message(int receiver, message_t *msg);
 static int send_iot_ack(message_t *org_msg, message_t *msg, int id, int receiver, int result, void *arg, int size);
 static void *scanner_func(void *arg);
 static int init_qrcode_isp(void);
+static int init_scanner_config(void);
 static int deinit_qrcode_isp(void);
+static int deinit_scanner_config(void);
 static int zbar_run(char **data);
 static int zbar_process(struct rts_av_buffer *buffer, char **result);
 static int iot_scan_code(message_t *data);
@@ -261,11 +265,17 @@ static void *scanner_func(void *arg)
 
 	//message body
 	play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
-
 	ret = init_qrcode_isp();
 	if(ret)
 	{
 		log_qcy(DEBUG_SERIOUS, "init_qrcode_isp failed");
+		goto exit;
+	}
+
+	ret = init_scanner_config();
+	if(ret)
+	{
+		log_qcy(DEBUG_SERIOUS, "init_scanner_config failed");
 		goto exit;
 	}
 
@@ -286,7 +296,9 @@ static void *scanner_func(void *arg)
 		if(ret == 2)
 		{
 			log_qcy(DEBUG_INFO, "qr code is not right");
-			free(data);
+			if(data)
+				free(data);
+			data = NULL;
 		}
 		else if(ret == 1)
 		{
@@ -294,7 +306,7 @@ static void *scanner_func(void *arg)
 		}
 
 		play_voice_ctl++;
-		if(play_voice_ctl > 20)
+		if(play_voice_ctl > 40)
 		{
 			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
 			play_voice_ctl = 0;
@@ -321,7 +333,8 @@ static void *scanner_func(void *arg)
 			send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
 								NULL, 0);
 
-		free(data);
+		if(data)
+			free(data);
 		if(result)
 			free(result);
 	}
@@ -330,6 +343,9 @@ exit:
 	scanner_status = 0;
 	if(deinit_qrcode_isp())
 		log_qcy(DEBUG_SERIOUS, "deinit_qrcode_isp failed");
+
+	if(deinit_scanner_config())
+		log_qcy(DEBUG_SERIOUS, "deinit_scanner_config failed");
 
 	msg_free(&msg_scan_t);
 	pthread_exit(0);
@@ -361,18 +377,10 @@ static int iot_scan_code(message_t *data)
 static int zbar_process(struct rts_av_buffer *buffer, char **result)
 {
     int ret = 1;
-    zbar_image_scanner_t *scanner = NULL;
-
-    scanner = zbar_image_scanner_create();
-    /* configure the reader */
-    zbar_image_scanner_set_config(scanner, 0, ZBAR_CFG_ENABLE, 1);
-
-    zbar_image_t *image = zbar_image_create();
-    zbar_image_set_format(image, *(int*)"Y800");
-    zbar_image_set_size(image, ZBAR_QRCODE_WIDTH, ZBAR_QRCODE_HIGH);
 
     memset(zbar_buf, 0, sizeof(zbar_buf));
     memcpy(zbar_buf, buffer->vm_addr, ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH);
+
     zbar_image_set_data(image, zbar_buf, ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH, zbar_image_free_data);
 
     /* scan the image for barcodes */
@@ -394,9 +402,6 @@ static int zbar_process(struct rts_av_buffer *buffer, char **result)
         }
     }
 
-    zbar_image_destroy(image);
-    zbar_image_scanner_destroy(scanner);
-
     return ret;
 }
 
@@ -407,17 +412,16 @@ static int zbar_run(char **data)
     struct rts_av_buffer *buffer = NULL;
 
     if (rts_av_poll(isp)) {
-        //log_qcy(DEBUG_SERIOUS, "rts_av_poll isp failed");
+        log_qcy(DEBUG_VERBOSE, "rts_av_poll isp failed");
         return 0;
     }
     if (rts_av_recv(isp, &buffer)) {
-    	//log_qcy(DEBUG_SERIOUS, "rts_av_recv isp buffer failed");
+    	log_qcy(DEBUG_VERBOSE, "rts_av_recv isp buffer failed");
     	return 0;
     }
     if(buffer) {
 
         result = zbar_process(buffer, data);
-
         rts_av_put_buffer(buffer);
         buffer = NULL;
     }
@@ -431,6 +435,22 @@ static int zbar_run(char **data)
     }
 
     return ret;
+}
+
+static int deinit_scanner_config(void)
+{
+    if(scanner)
+    {
+    	zbar_image_scanner_destroy(scanner);
+    	scanner = NULL;
+    }
+    if(image)
+    {
+    	zbar_image_destroy(image);
+    	image = NULL;
+    }
+
+    return 0;
 }
 
 static int deinit_qrcode_isp(void)
@@ -452,6 +472,31 @@ static int deinit_qrcode_isp(void)
     isp = -1;
 
     return ret;
+}
+
+static int init_scanner_config(void)
+{
+    scanner = zbar_image_scanner_create();
+    if(!scanner)
+    {
+    	log_qcy(DEBUG_SERIOUS, "zbar_image_scanner_create failed");
+    	return -1;
+    }
+    /* configure the reader */
+    zbar_image_scanner_set_config(scanner, 0, ZBAR_CFG_ENABLE, 1);
+
+    image = zbar_image_create();
+	if(!image)
+	{
+		log_qcy(DEBUG_SERIOUS, "zbar_image_create failed");
+		zbar_image_scanner_destroy(scanner);
+		return -1;
+	}
+
+    zbar_image_set_format(image, *(int*)"Y800");
+    zbar_image_set_size(image, ZBAR_QRCODE_WIDTH, ZBAR_QRCODE_HIGH);
+
+    return 0;
 }
 
 static int init_qrcode_isp(void)
