@@ -37,15 +37,19 @@
  * static
  */
 //variable
-static int isp = -1;
+static pthread_mutex_t		s_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t		s_cond = PTHREAD_COND_INITIALIZER;
 static server_info_t 		info;
 static message_buffer_t		message;
-static char zbar_buf[ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH + 1] = {0};
-static int scanner_status = 0;
-static message_t msg_scan_t;
-static const char *key = "89JFSjo8HUbhou5776NJOMp9i90ghg7Y78G78t68899y79HY7g7y87y9ED45Ew30O0jkkl";
+static message_t 			msg_scan_t;
 static zbar_image_scanner_t *scanner = NULL;
-static zbar_image_t *image = NULL;
+static zbar_image_t 		*image = NULL;
+static int 					scanner_fun_exit = 0;
+static int 					scanner_status = 0;
+static int 					isp = -1;
+static char 				zbar_buf[ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH + 1] = {0};
+static const char 			*key = "89JFSjo8HUbhou5776NJOMp9i90ghg7Y78G78t68899y79HY7g7y87y9ED45Ew30O0jkkl";
+
 //function
 //common
 static void *server_func(void);
@@ -77,6 +81,8 @@ static void play_voice(int server_type, int type);
 static void xor_crypt(const char *key, char *string, int n);
 static unsigned char *base64_decode(unsigned char *code);
 static int prase_data(char *src, char **dest);
+static void *scanner_ctl_thread(void *arg);
+static void my_free(char *data);
 //specific
 
 /*
@@ -88,6 +94,13 @@ static int prase_data(char *src, char **dest);
 /*
  * helper
  */
+static void my_free(char *data)
+{
+   if(data)
+	   free(data);
+   data = NULL;
+}
+
 static int prase_data(char *src, char **dest)
 {
 	int ret = 0;
@@ -173,10 +186,8 @@ static int prase_data(char *src, char **dest)
 	memcpy(*dest, tmp, strlen(tmp));
 
 err:
-	if(ssid != NULL)
-		free(ssid);
-	if(pssd != NULL)
-		free(pssd);
+	my_free(ssid);
+	my_free(pssd);
 
 	cJSON_Delete(pJsonRoot);
 	return ret;
@@ -210,7 +221,7 @@ static unsigned char *base64_decode(unsigned char *code)
     else
         str_len=len/4*3;
 
-    res=malloc(sizeof(unsigned char)*str_len+1);
+    res=calloc(1, sizeof(unsigned char)*str_len+1);
     res[str_len]='\0';
 
     for(i=0,j=0;i < len-2;j+=3,i+=4)
@@ -247,6 +258,40 @@ static void play_voice(int server_type, int type)
 	server_speaker_message(&message);
 }
 
+static void *scanner_ctl_thread(void *arg)
+{
+	message_t msg;
+	int timer_num=0;
+	log_qcy(DEBUG_INFO,"into scanner_ctl_thread");
+
+	pthread_detach(pthread_self());
+	while(!server_get_status(STATUS_TYPE_EXIT))
+	{
+		if(scanner_fun_exit)	break;
+		sleep(1);
+		timer_num++;
+		if(timer_num == 1800)
+		{
+			play_voice(SERVER_SCANNER, SPEAKER_CTL_INTERNET_CONNECT_DEFEAT);
+			memset(&msg,0,sizeof(message_t));
+			msg.sender = msg.receiver = SERVER_SCANNER;
+			msg.message = MSG_SCANNER_SIGINT;
+			manager_common_send_message(SERVER_MANAGER, &msg);
+			break;
+		}
+		if(!(timer_num%9))
+		{
+			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
+		}
+	}
+
+	log_qcy(DEBUG_INFO, "-----------thread exit: scanner_ctl_thread-----------");
+	scanner_fun_exit = 0;
+	pthread_exit(0);
+
+}
+
+
 static void *scanner_func(void *arg)
 {
 	int ret = 0;
@@ -254,8 +299,6 @@ static void *scanner_func(void *arg)
 	char *result = NULL;
 	server_status_t st;
 	message_t send_msg;
-	int play_voice_ctl = 0;
-	int scanner_fun_exit = 0;
 
     signal(SIGINT, (__sighandler_t)server_thread_termination);
     signal(SIGTERM, (__sighandler_t)server_thread_termination);
@@ -296,26 +339,13 @@ static void *scanner_func(void *arg)
 		if(ret == 2)
 		{
 			log_qcy(DEBUG_INFO, "qr code is not right");
-			if(data)
-				free(data);
-			data = NULL;
+			my_free(data);
 		}
 		else if(ret == 1)
 		{
+			scanner_fun_exit = 1;
 			break;
 		}
-
-		play_voice_ctl++;
-		if(play_voice_ctl > 40)
-		{
-			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
-			play_voice_ctl = 0;
-			scanner_fun_exit++;
-		}
-
-		if(scanner_fun_exit > 5)
-			break;
-
 		//free(data);
     }
 
@@ -326,6 +356,7 @@ static void *scanner_func(void *arg)
 		{
 			log_qcy(DEBUG_INFO, "prase_data ------- result = %s", result);
 			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN_SUCCEED);
+
 			send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
 								result, strlen(result) + 1);
 		}
@@ -333,10 +364,8 @@ static void *scanner_func(void *arg)
 			send_iot_ack(&msg_scan_t, &send_msg, MSG_SCANNER_QR_CODE_BEGIN_ACK, msg_scan_t.receiver, ret,
 								NULL, 0);
 
-		if(data)
-			free(data);
-		if(result)
-			free(result);
+		my_free(data);
+		my_free(result);
 	}
 
 exit:
@@ -355,7 +384,7 @@ static int iot_scan_code(message_t *data)
 {
 	int ret = 0;
 	static pthread_t scanner_mode_tid = 0;
-
+	static pthread_t scanner_ctl_tid;
 	if(scanner_status != 0)
 	{
 		log_qcy(DEBUG_SERIOUS, "scanner qr thread is busy");
@@ -371,6 +400,11 @@ static int iot_scan_code(message_t *data)
 		scanner_status = 1;
 	}
 
+	if (ret |= pthread_create(&scanner_ctl_tid,NULL,scanner_ctl_thread,NULL)) {
+		log_qcy(DEBUG_SERIOUS, "create creat_scanner_ctl_thread thread failed, ret = %d\n", ret);
+		ret = -1;
+	}
+
 	return ret;
 }
 
@@ -378,17 +412,26 @@ static int zbar_process(struct rts_av_buffer *buffer, char **result)
 {
     int ret = 1;
 
+    printf("i am in zbar_process 111111\n");
+
     memset(zbar_buf, 0, sizeof(zbar_buf));
+
+    printf("i am in zbar_process 22222 buffer->vm_addr = %p buffer->bytesused = %d, buffer->length = %d,\n",buffer->vm_addr, buffer->bytesused, buffer->length);
     memcpy(zbar_buf, buffer->vm_addr, ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH);
 
+    printf("i am in zbar_process 3333 image = %p, zbar_buf = %p\n",image ,zbar_buf);
     zbar_image_set_data(image, zbar_buf, ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH, zbar_image_free_data);
 
+    printf("i am in zbar_process 4444\n");
     /* scan the image for barcodes */
     int n = zbar_scan_image(scanner, image);
+    printf("i am in zbar_process 5555\n");
+
     if(n != 0)
     	log_qcy(DEBUG_VERBOSE, "result1 n = %d\r\n", n);
     /* extract results */
     const zbar_symbol_t *symbol = zbar_image_first_symbol(image);
+    printf("i am in zbar_process 6666\n");
     for(; symbol; symbol = zbar_symbol_next(symbol)) {
         /* do something useful with results */
 //      zbar_symbol_type_t typ = zbar_symbol_get_type(symbol);
@@ -548,7 +591,7 @@ static void server_thread_termination(void)
 
 static int server_release(void)
 {
-	while(scanner_status)
+	while(scanner_status || scanner_fun_exit)
 		usleep(100 * 1000);
 
 	msg_buffer_release(&message);
@@ -653,11 +696,21 @@ static int server_message_proc(void)
 	message_t send_msg;
 	msg_init(&msg);
 	msg_init(&send_msg);
+
+	pthread_mutex_lock(&s_mutex);
+	if( message.head == message.tail ) {
+		if( info.status==STATUS_RUN ) {
+			pthread_cond_wait(&s_cond,&s_mutex);
+		}
+	}
+	pthread_mutex_unlock(&s_mutex);
+
 	ret = pthread_rwlock_wrlock(&message.lock);
 	if(ret)	{
 		log_qcy(DEBUG_SERIOUS, "add message lock fail, ret = %d\n", ret);
 		return ret;
 	}
+
 	ret = msg_buffer_pop(&message, &msg);
 	ret1 = pthread_rwlock_unlock(&message.lock);
 	if (ret1) {
@@ -859,6 +912,10 @@ int server_scanner_message(message_t *msg)
 	ret = msg_buffer_push(&message, msg);
 	if( ret!=0 )
 		log_qcy(DEBUG_SERIOUS, "message push in scanner error =%d", ret);
+	else {
+		pthread_cond_signal(&s_cond);
+	}
+
 	ret1 = pthread_rwlock_unlock(&message.lock);
 	if (ret1)
 		log_qcy(DEBUG_SERIOUS, "add message unlock fail, ret = %d\n", ret1);
