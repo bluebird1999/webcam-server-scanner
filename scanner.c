@@ -913,7 +913,9 @@ int server_scanner_message(message_t *msg)
 	if( ret!=0 )
 		log_qcy(DEBUG_SERIOUS, "message push in scanner error =%d", ret);
 	else {
+		pthread_mutex_lock(&s_mutex);
 		pthread_cond_signal(&s_cond);
+		pthread_mutex_unlock(&s_mutex);
 	}
 
 	ret1 = pthread_rwlock_unlock(&message.lock);
