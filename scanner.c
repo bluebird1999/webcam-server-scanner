@@ -268,7 +268,6 @@ static void *scanner_ctl_thread(void *arg)
 	while(!server_get_status(STATUS_TYPE_EXIT))
 	{
 		if(scanner_fun_exit)	break;
-		sleep(1);
 		timer_num++;
 		if(timer_num == 1800)
 		{
@@ -283,6 +282,7 @@ static void *scanner_ctl_thread(void *arg)
 		{
 			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
 		}
+		sleep(1);
 	}
 
 	log_qcy(DEBUG_INFO, "-----------thread exit: scanner_ctl_thread-----------");
