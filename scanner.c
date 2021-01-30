@@ -22,10 +22,10 @@
 //program header
 #include "../../tools/tools_interface.h"
 #include "../../manager/manager_interface.h"
-#include "../../server/speaker/speaker_interface.h"
 #include "../../server/miio/miio_interface.h"
 #include "../../server/miss/miss_interface.h"
 #include "../../server/realtek/realtek_interface.h"
+#include "../../server/device/device_interface.h"
 #include "../../server/audio/audio_interface.h"
 #include "../../server/recorder/recorder_interface.h"
 //server header
@@ -49,6 +49,7 @@ static int 					scanner_status = 0;
 static int 					isp = -1;
 static char 				zbar_buf[ZBAR_QRCODE_WIDTH * ZBAR_QRCODE_HIGH + 1] = {0};
 static const char 			*key = "89JFSjo8HUbhou5776NJOMp9i90ghg7Y78G78t68899y79HY7g7y87y9ED45Ew30O0jkkl";
+static int					motor_ready = 0;
 
 //function
 //common
@@ -168,7 +169,7 @@ static int prase_data(char *src, char **dest)
 	if(pssd)
 		cJSON_AddStringToObject(pSubJson, "passwd", pssd);
 	if(timezone)
-		cJSON_AddStringToObject(pSubJson, "tz", timezone);
+		cJSON_AddStringToObject(pSubJson, "tz", "Asia/Shanghai");
 	if(region)
 		cJSON_AddStringToObject(pSubJson, "country_domain", region);
 
@@ -252,10 +253,10 @@ static void play_voice(int server_type, int type)
 	msg_init(&message);
 
 	message.sender = message.receiver = server_type;
-	message.message = MSG_SPEAKER_CTL_PLAY;
+	message.message = MSG_AUDIO_SPEAKER_CTL_PLAY;
 	message.arg_in.cat = type;
 
-	server_speaker_message(&message);
+	server_audio_message(&message);
 }
 
 static void *scanner_ctl_thread(void *arg)
@@ -272,15 +273,20 @@ static void *scanner_ctl_thread(void *arg)
 		if(timer_num == 1800)
 		{
 			play_voice(SERVER_SCANNER, SPEAKER_CTL_INTERNET_CONNECT_DEFEAT);
-			memset(&msg,0,sizeof(message_t));
+			int i = 0;
+		    msg_init(&msg);
 			msg.sender = msg.receiver = SERVER_SCANNER;
-			msg.message = MSG_SCANNER_SIGINT;
+			msg.message = MSG_MANAGER_PROPERTY_SET;
+			msg.arg_in.cat = MANAGER_PROPERTY_SLEEP;
+			msg.arg = &i;
+			msg.arg_size = sizeof(int);
 			manager_common_send_message(SERVER_MANAGER, &msg);
 			break;
 		}
 		if(!(timer_num%9))
 		{
-			play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
+			if(motor_ready)
+				play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
 		}
 		sleep(1);
 	}
@@ -288,7 +294,6 @@ static void *scanner_ctl_thread(void *arg)
 	log_qcy(DEBUG_INFO, "-----------thread exit: scanner_ctl_thread-----------");
 	scanner_fun_exit = 0;
 	pthread_exit(0);
-
 }
 
 
@@ -307,7 +312,6 @@ static void *scanner_func(void *arg)
     msg_init(&send_msg);
 
 	//message body
-	play_voice(SERVER_SCANNER, SPEAKER_CTL_ZBAR_SCAN);
 	ret = init_qrcode_isp();
 	if(ret)
 	{
@@ -322,8 +326,6 @@ static void *scanner_func(void *arg)
 		goto exit;
 	}
 
-	sleep(1);
-
     while(!server_get_status(STATUS_TYPE_EXIT))
     {
 		//exit logic
@@ -334,6 +336,18 @@ static void *scanner_func(void *arg)
 			else
 				break;
 		}
+
+    	//get from device
+    	if(!motor_ready)
+    	{
+    		send_msg.message = MSG_DEVICE_PROPERTY_GET;
+    		send_msg.sender = send_msg.receiver = SERVER_SCANNER;
+    		send_msg.arg_pass.cat = DEVICE_ACTION_MOTO_STATUS;
+    		manager_common_send_message(SERVER_DEVICE, &send_msg);
+    		/****************************/
+    		usleep(MESSAGE_RESENT_SLEEP);
+    		continue;
+    	}
 
     	ret = zbar_run(&data);
 		if(ret == 2)
@@ -549,7 +563,7 @@ static int init_qrcode_isp(void)
     struct rts_av_profile profile;
 
     if(isp < 0) {
-        isp_attr.isp_id = 0;
+        isp_attr.isp_id = 1;
         isp_attr.isp_buf_num = 2;
         isp = rts_av_create_isp_chn(&isp_attr);
         if (isp < 0) {
@@ -732,6 +746,12 @@ static int server_message_proc(void)
 			break;
 		case MSG_SCANNER_QR_CODE_BEGIN:
 			ret = iot_scan_code(&msg);
+			break;
+		case MSG_DEVICE_PROPERTY_GET_ACK:
+			if(msg.arg_pass.cat == DEVICE_ACTION_MOTO_STATUS) {
+				if(msg.arg_in.dog == 1)
+					motor_ready = 1;
+			}
 			break;
 		default:
 			log_qcy(DEBUG_SERIOUS, "not processed message = %d", msg.message);
